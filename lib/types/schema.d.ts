@@ -2,64 +2,71 @@ export type schemaPropertyPrimitivType = number | string | boolean | null | Numb
 export type schemaPropertySetType = Set<number> | Set<string>;
 export type schemaPropertyType = schemaPropertyPrimitivType | ISchema | Array<schemaPropertyPrimitivType> | schemaPropertySetType;
 
-export interface ISchemaOptions {
-    type: ISchema | schemaPropertyPrimitivType;
-    required?: boolean | "once";
-    default?: ISchema;
-    min?: number;
-    max?: number;
-    trim?: boolean;
-    partitionKey?: boolean;
-    secondaryKey?: boolean;
-    globalIndex?: boolean;
-    sortKey?: boolean;
-}
-
 interface ISchemaString {
-    default?: string | ((self?: any) => string);
-    trim?: boolean;
-    minLength?: number;
-    maxLength?: number;
-    enum?: string[];
+  default?: string | ((self?: any) => string);
+  trim?: boolean;
+  minLength?: number | ((self?: any) => number);
+  maxLength?: number | ((self?: any) => number);
+  enum?: string[] | ((self?: any) => string[]);
+  set?: (self?: any) => string;
 }
 
 interface ISchemaNumber {
-    default?: number;
-    min?: number;
-    max?: number;
-    enum?: number[];
+  default?: number | ((self?: any) => number);
+  min?: number | ((self?: any) => number);
+  max?: number | ((self?: any) => number);
+  enum?: number[] | ((self?: any) => number[]);
+  set?: (self?: any) => number;
 }
 
 interface ISchemaBinary {
-    min?: number;
-    max?: number;
+  min?: number | ((self?: any) => number);
+  max?: number | ((self?: any) => number);
 }
 
+type DyObject = {
+  [key: string]: DBString | DBNumber;
+};
+
+interface ISchemaObject {
+  type?: "M";
+  default?: object | ((self?: any) => DyObject);
+  required?: boolean | ((self) => boolean);
+  set?: (self?: any) => DyObject;
+  fields?: DyObject | any;
+}
+
+// interface ISchemaArray {
+//     required?: boolean | ((self) => boolean);
+//     fields:  {
+//         [key: string]: DBString | DBNumber
+//     }
+// }
 interface ISchemaPrimitiveAttributes {
-    partitionKey?: boolean;
-    secondaryKey?: boolean;
-    globalIndex?: boolean;
-    sortKey?: boolean;
-    required?: boolean | ((self) => boolean);
-    set?: FunctionConstructor;
-    get?: FunctionConstructor;
-    type?: "S" | "N" | "B";
+  partitionKey?: boolean;
+  secondaryKey?: boolean;
+  globalIndex?: boolean;
+  sortKey?: boolean;
+  required?: boolean | ((self) => boolean);
+  get?: (self?: any) => any;
+  type?: "S" | "N" | "B";
 }
 
 export type DBString = ISchemaString & ISchemaPrimitiveAttributes;
 export type DBNumber = ISchemaNumber & ISchemaPrimitiveAttributes;
+export type DBObject = ISchemaObject;
 
 export interface ISchema {
-    [attributeName: string]: DBString | DBNumber;
+  [attributeName: string]: DBString | DBNumber | DBObject;
 }
 
 export interface VirtualFields {
-    [key: string]: Function;
+  [key: string]: Function;
 }
 
 export type selectAlias = { [key: string]: string | boolean };
 
 export interface createOptions {
-    returnCreated?: boolean;
-    applyVirtualSetters?: boolean;
+  returnCreated?: boolean;
+  applyVirtualSetters?: boolean;
 }
