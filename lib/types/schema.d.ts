@@ -4,7 +4,10 @@ export type schemaPropertyType = schemaPropertyPrimitivType | ISchema | Array<sc
 
 interface ISchemaString {
   default?: string | ((self?: any) => string);
-  trim?: boolean;
+  trim?: boolean | ((self?: any) => boolean);
+  lowercase?: boolean | ((self?: any) => boolean);
+  uppercase?: boolean | ((self?: any) => boolean);
+  capitalize?: boolean | ((self?: any) => boolean);
   minLength?: number | ((self?: any) => number);
   maxLength?: number | ((self?: any) => number);
   enum?: string[] | ((self?: any) => string[]);
@@ -24,24 +27,21 @@ interface ISchemaBinary {
   max?: number | ((self?: any) => number);
 }
 
-type DyObject = {
-  [key: string]: DBString | DBNumber;
-};
-
 interface ISchemaObject {
   type?: "M";
-  default?: object | ((self?: any) => DyObject);
+  default?: object | ((self?: any) => object);
   required?: boolean | ((self) => boolean);
-  set?: (self?: any) => DyObject;
-  fields?: DyObject | any;
+  set?: (self?: any) => ISchema;
+  ignoreUndeclared?: boolean;
+  fields?: ISchema;
 }
 
-// interface ISchemaArray {
-//     required?: boolean | ((self) => boolean);
-//     fields:  {
-//         [key: string]: DBString | DBNumber
-//     }
-// }
+interface ISchemaArray {
+  type?: "L";
+  default?: array | ((self?: any) => array);
+  required?: boolean | ((self) => boolean);
+  set?: (self?: any) => array;
+}
 interface ISchemaPrimitiveAttributes {
   partitionKey?: boolean;
   secondaryKey?: boolean;
@@ -55,6 +55,7 @@ interface ISchemaPrimitiveAttributes {
 export type DBString = ISchemaString & ISchemaPrimitiveAttributes;
 export type DBNumber = ISchemaNumber & ISchemaPrimitiveAttributes;
 export type DBObject = ISchemaObject;
+export type DBArray = ISchemaArray;
 
 export interface ISchema {
   [attributeName: string]: DBString | DBNumber | DBObject;
@@ -64,9 +65,10 @@ export interface VirtualFields {
   [key: string]: Function;
 }
 
-export type selectAlias = { [key: string]: string | boolean };
+export type selectAlias = { [key: string]: string | boolean | selectAlias };
 
 export interface createOptions {
   returnCreated?: boolean;
   applyVirtualSetters?: boolean;
+  applyVirtualGetters?: boolean;
 }

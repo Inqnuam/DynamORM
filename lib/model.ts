@@ -13,6 +13,7 @@ import {
   QueryCommandInput,
   QueryCommandOutput,
   PutCommandInput,
+  UpdateCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import {
   DynamoDBClient,
@@ -33,6 +34,13 @@ import { Schema } from "./schema";
 import { ISchema, selectAlias, createOptions, DBNumber, DBString } from "./types/schema";
 import { EventEmitter } from "events";
 import { reservedWords } from "./reservedWords";
+import { applyStringTransformers } from "./utils/applyStringTransformers";
+import { applyCustomSetters } from "./utils/applyCustomSetters";
+import { verifyNumberMinMax } from "./utils/verifyNumberMinMax";
+import { verifyStringMinMax } from "./utils/verifyStringMinMax";
+import { verifyEnums } from "./utils/verifyEnums";
+import { setDefaultFields } from "./utils/setDefaultFields";
+import { verifyRequiredFields } from "./utils/verifyRequiredFields";
 
 export class Model extends EventEmitter {
   // temporary use of EventEmiter for testing in index.ts as top-level await isnt supported
@@ -43,7 +51,7 @@ export class Model extends EventEmitter {
   protected TableDescription?: TableDescription;
   static TableNames?: string[];
   static definedModels: Model[] = [];
-  readonly defaultCreateOptions: createOptions = { returnCreated: false, applyVirtualSetters: true };
+  #defaultCreateOptions: createOptions = { returnCreated: false, applyVirtualSetters: true, applyVirtualGetters: true };
 
   constructor(name: string, schema: Schema, clientConfig: DynamoDBClientConfig, translateConfig?: TranslateConfig) {
     if (Model.definedModels.find((x) => x.name == name)) {
@@ -55,12 +63,30 @@ export class Model extends EventEmitter {
     this.client = new DynamoDBClient(clientConfig);
     this.docClient = DynamoDBDocumentClient.from(this.client, translateConfig);
 
-    this.init().then(() => {
+    this.#init().then(() => {
       this.emit("ready");
     });
   }
 
-  private getCmdInputParams(partitionKey: string | number, select?: string | selectAlias): GetCommandInput {
+  #buildSelectableString(select: any, nestedPath?: string) {
+    let selectString: string[] = [];
+
+    for (const field of Object.keys(select)) {
+      if (typeof select[field] === "string" || select[field] === true) {
+        selectString.push(nestedPath ? `${nestedPath}.${field}` : field);
+      } else if (typeof select[field] == "object") {
+        let aliasedField = field;
+        if (field.includes(":")) {
+          aliasedField = field.split(":")[0];
+        }
+        const parsedChild = this.#buildSelectableString(select[field], nestedPath ? `${nestedPath}.${aliasedField}` : aliasedField);
+        selectString = [...selectString, ...parsedChild];
+      }
+    }
+
+    return selectString;
+  }
+  #getCmdInputParams(partitionKey: string | number, select?: string | selectAlias): GetCommandInput {
     const key = this.schema.partitionKey;
     let params: GetCommandInput = {
       TableName: this.name,
@@ -73,27 +99,17 @@ export class Model extends EventEmitter {
     if (typeof select == "string") {
       params.ProjectionExpression = select;
     } else if (typeof select == "object" && !Array.isArray(select)) {
-      const selectAsAlias = Object.keys(select)
-        .filter((a) => typeof select[a] === "string")
-        .join(",");
+      let selectString: string[] = this.#buildSelectableString(select);
 
-      const selector = Object.keys(select)
-        .filter((a) => select[a] === true)
-        .join(",");
-      params.ProjectionExpression = `${selectAsAlias},${selector}`;
+      params.ProjectionExpression = selectString.join(",");
     }
 
     if (params.ProjectionExpression) {
       params.ProjectionExpression = params.ProjectionExpression.replace(/\s/g, "");
-      const checkingWords = params.ProjectionExpression.split(",");
-
-      checkingWords.forEach((word) => {
-        if (reservedWords.indexOf(word.toUpperCase()) !== -1) {
-          const safeValue = `#Safe${word}`;
-          ExpressionAttributeNames[safeValue] = word;
-          params.ProjectionExpression = params.ProjectionExpression!.replace(word, safeValue);
-        }
-      });
+      const checkingWords = params.ProjectionExpression.split(",")
+        .map((w) => applyDynamoSelectExpressions(ExpressionAttributeNames, w))
+        .join(",");
+      params.ProjectionExpression = checkingWords;
     }
 
     if (Object.keys(ExpressionAttributeNames).length) {
@@ -103,7 +119,7 @@ export class Model extends EventEmitter {
     return params;
   }
 
-  private createTable(): Promise<CreateTableCommandOutput> {
+  async #createTable(): Promise<CreateTableCommandOutput> {
     const createTableCmd = new CreateTableCommand({
       TableName: this.name,
       AttributeDefinitions: this.schema.AttributeDefinitions,
@@ -117,7 +133,7 @@ export class Model extends EventEmitter {
     return this.client.send(createTableCmd);
   }
 
-  private async getTableNamesFromDB(): Promise<string[] | undefined> {
+  async #getTableNamesFromDB(): Promise<string[] | undefined> {
     try {
       const { TableNames } = await this.client.send(new ListTablesCommand({}));
       return TableNames;
@@ -126,8 +142,8 @@ export class Model extends EventEmitter {
     }
   }
 
-  private async applyVirtualGetters(dynamoItem: any, select?: string | selectAlias): Promise<Object> {
-    const virtualFields = this.isSelectAlias(select) ? Object.keys(this.schema.virtualsGetter).filter((a) => (select as selectAlias)[a]) : Object.keys(this.schema.virtualsGetter);
+  async #applyVirtualGetters(dynamoItem: any, select?: string | selectAlias): Promise<Object> {
+    const virtualFields = this.#isSelectAlias(select) ? Object.keys(this.schema.virtualsGetter).filter((a) => (select as selectAlias)[a]) : Object.keys(this.schema.virtualsGetter);
 
     for (const funcName of virtualFields) {
       const virtualFunc = this.schema.virtualsGetter[funcName] as Function;
@@ -138,43 +154,31 @@ export class Model extends EventEmitter {
     return dynamoItem;
   }
 
-  private applyAlias(dynamoItem: any, select: selectAlias) {
-    // Currently only top level alias is supported
-    if (typeof select == "object" && !Array.isArray(select)) {
-      const selectAsAlias = Object.keys(select).filter((a) => typeof select[a] === "string");
+  async #applyVirtualSetters(dynamoItem: any): Promise<Object> {
+    const virtualFields = Object.keys(this.schema.virtualsSetter);
 
-      selectAsAlias.forEach((key) => {
-        let paths = key.split(".");
+    for (const funcName of virtualFields) {
+      const virtualFunc = this.schema.virtualsSetter[funcName] as Function;
 
-        if (paths.length === 1) {
-          const alias = select[paths[0]] as string;
-          if (paths[0] == alias) {
-            return;
-          }
-
-          const originalObject = dynamoItem[paths[0]];
-          dynamoItem[alias] = originalObject;
-
-          delete dynamoItem[paths[0]];
-        }
-      });
+      dynamoItem[funcName] = await virtualFunc(dynamoItem);
     }
+
     return dynamoItem;
   }
 
-  private async init() {
+  async #init() {
     try {
       if (!Model.TableNames) {
-        Model.TableNames = await this.getTableNamesFromDB();
+        Model.TableNames = await this.#getTableNamesFromDB();
       }
 
       if (Model.TableNames && Model.TableNames.indexOf(this.name) == -1) {
-        this.TableDescription = (await this.createTable()).TableDescription;
+        this.TableDescription = (await this.#createTable()).TableDescription;
       } else {
         // check if table structure is the same as in Schema
         // Otherwise request update Table
 
-        this.TableDescription = (await this.describe()).Table;
+        this.TableDescription = (await this.#describe()).Table;
       }
       //  console.log(this.TableDescription);
     } catch (error) {
@@ -182,184 +186,19 @@ export class Model extends EventEmitter {
     }
   }
 
-  private isSelectAlias(obj?: string | selectAlias) {
+  #isSelectAlias(obj?: string | selectAlias) {
     const selectType = typeof obj;
     return obj && selectType !== "string" && selectType == "object" && !Array.isArray(selectType);
   }
 
-  private describe(): Promise<DescribeTableCommandOutput> {
+  #describe(): Promise<DescribeTableCommandOutput> {
     const cmd: DescribeTableCommandInput = {
       TableName: this.name,
     };
     return this.client.send(new DescribeTableCommand(cmd));
   }
 
-  private async getRequiredFields(item: any): Promise<string[]> {
-    const fields = this.schema.fields;
-    let requiredFields: string[] = [];
-
-    for (const field of Object.keys(fields)) {
-      const requiredType = typeof fields[field].required;
-
-      if (requiredType == "boolean") {
-        requiredFields.push(field);
-      } else if (requiredType == "function") {
-        const requiredFunc = fields[field].required as unknown as Function;
-
-        const isRequired = await requiredFunc(item);
-
-        if (isRequired) {
-          requiredFields.push(field);
-        }
-      }
-    }
-
-    return requiredFields;
-  }
-
-  private async setDefaultFields(item: any): Promise<any> {
-    let sendingItem = { ...item };
-
-    const requiredFields = await this.getRequiredFields(item);
-
-    for (const e of requiredFields) {
-      if (!item[e]) {
-        const keyInSchema = this.schema.fields[e];
-        const defaultType = typeof keyInSchema.default;
-
-        if (defaultType == "function") {
-          const func = keyInSchema.default as unknown as Function;
-          sendingItem[e] = await func();
-        } else if (defaultType !== "undefined") {
-          sendingItem[e] = keyInSchema.default;
-        } else {
-          throw new Error(`${this.name}.${e} is required`);
-        }
-      }
-    }
-
-    return sendingItem;
-  }
-
-  private async getEnumFields(item: any): Promise<any> {
-    const fields = this.schema.fields;
-
-    let enumFields: any = {};
-
-    for (const field of Object.keys(fields)) {
-      const fType = fields[field].type;
-      let enumField: string[] | number[] = [];
-      if (fType == "S") {
-        enumField = (fields[field] as DBString).enum as string[];
-      }
-      if (fType == "N") {
-        enumField = (fields[field] as DBNumber).enum as number[];
-      }
-      if (Array.isArray(enumField) && enumField.length) {
-        enumFields[field] = enumField;
-      } else if (typeof enumField == "function") {
-        const enumFunc = enumField as Function;
-        enumFields[field] = await enumFunc(item);
-      }
-    }
-    return enumFields;
-  }
-  private async verifyEnums(item: any) {
-    const enumFields = await this.getEnumFields(item);
-    console.log(enumFields);
-    for (const field of Object.keys(item)) {
-      if (enumFields[field] && !enumFields[field].includes(item[field])) {
-        const allowedValues = enumFields[field].join(" / ");
-        throw Error(`value '${item[field]}' is not supported on field '${this.name}.${field}'. Allowed values are '${allowedValues}'`);
-      }
-    }
-  }
-
-  private async verifyStringMinMax(item: any) {
-    const fields = this.schema.fields;
-    let minValues: any = {};
-    let maxValues: any = {};
-
-    for (const field of Object.keys(fields)) {
-      const minValue = (fields[field] as DBString).minLength;
-      const maxValue = (fields[field] as DBString).maxLength;
-
-      if (typeof minValue == "number") {
-        minValues[field] = minValue;
-      } else if (typeof minValue == "function") {
-        const minValueFunc = minValue as unknown as Function;
-        minValues[field] = await minValueFunc(item);
-
-        if (typeof minValues[field] !== "number") {
-          throw Error(`Custom defined 'min' function on '${this.name}.${field}' must return a number, received '${typeof maxValues[field]}'!`);
-        }
-      }
-
-      if (typeof maxValue == "number") {
-        maxValues[field] = maxValue;
-      } else if (typeof maxValue == "function") {
-        const maxValueFunc = maxValue as unknown as Function;
-        maxValues[field] = await maxValueFunc(item);
-
-        if (typeof maxValues[field] !== "number") {
-          throw Error(`Custom defined 'max' function on '${this.name}.${field}' must return a number, received '${typeof maxValues[field]}'!`);
-        }
-      }
-    }
-
-    Object.keys(item).forEach((field) => {
-      if (field in minValues && item[field].length < minValues[field]) {
-        throw Error(`Minimum allowed length for '${this.name}.${field}' is ${minValues[field]}`);
-      }
-
-      if (field in maxValues && item[field].length > maxValues[field]) {
-        throw Error(`Maximum allowed length for '${this.name}.${field}' is ${maxValues[field]}`);
-      }
-    });
-  }
-  private async verifyNumberMinMax(item: any) {
-    const fields = this.schema.fields;
-    let minValues: any = {};
-    let maxValues: any = {};
-
-    for (const field of Object.keys(fields)) {
-      const minValue = (fields[field] as DBNumber).min;
-      const maxValue = (fields[field] as DBNumber).max;
-
-      if (typeof minValue == "number") {
-        minValues[field] = minValue;
-      } else if (typeof minValue == "function") {
-        const minValueFunc = minValue as unknown as Function;
-        minValues[field] = await minValueFunc(item);
-
-        if (typeof minValues[field] !== "number") {
-          throw Error(`Custom defined 'min' function on '${this.name}.${field}' must return a number, received '${typeof maxValues[field]}'!`);
-        }
-      }
-
-      if (typeof maxValue == "number") {
-        maxValues[field] = maxValue;
-      } else if (typeof maxValue == "function") {
-        const maxValueFunc = maxValue as unknown as Function;
-        maxValues[field] = await maxValueFunc(item);
-
-        if (typeof maxValues[field] !== "number") {
-          throw Error(`Custom defined 'max' function on '${this.name}.${field}' must return a number, received '${typeof maxValues[field]}'!`);
-        }
-      }
-    }
-
-    Object.keys(item).forEach((field) => {
-      if (field in minValues && item[field] < minValues[field]) {
-        throw Error(`Minimum allowed value for '${this.name}.${field}' is '${minValues[field]}', received ${item[field]}`);
-      }
-
-      if (field in maxValues && item[field] > maxValues[field]) {
-        throw Error(`Maximum allowed value for '${this.name}.${field}' is '${maxValues[field]}', received ${item[field]}`);
-      }
-    });
-  }
-  private cleanUnusedFields(item: any): any {
+  #cleanUnusedFields(item: any): any {
     const allowedFields = [...Object.keys(this.schema.fields), ...Object.keys(this.schema.virtualsSetter)];
 
     Object.keys(item).forEach((field) => {
@@ -371,22 +210,15 @@ export class Model extends EventEmitter {
     return item;
   }
 
-  private verifyFieldsTypes(item: any) {}
+  async #verifyFields(item: any) {
+    await verifyRequiredFields(this.schema.fields, item, this.name);
 
-  private async applyCustomSetters(item: any): Promise<any> {
-    const fields = this.schema.fields;
-    const fieldsWithSetters = Object.keys(fields).filter((field) => fields[field].set);
-    const settableFields = Object.keys(item).filter((field) => fieldsWithSetters.indexOf(field) !== -1);
-
-    let appliedValues: any = {};
-
-    for (const field of settableFields) {
-      const setterFunc = fields[field].set as Function;
-      appliedValues[field] = await setterFunc(item);
-    }
-
-    return { ...item, ...appliedValues };
+    //  TODO: verifyTypes
+    await verifyEnums(this.schema.fields, item, this.name);
+    await verifyStringMinMax(this.schema.fields, item, this.name);
+    await verifyNumberMinMax(this.schema.fields, item, this.name);
   }
+
   rawQuery(queryInput: QueryCommandInput): Promise<QueryCommandOutput> {
     queryInput.TableName = this.name;
 
@@ -401,21 +233,55 @@ export class Model extends EventEmitter {
     return this.docClient.send(new QueryCommand(findRequest));
   }
 
-  async create(item: any, options: createOptions = this.defaultCreateOptions): Promise<PutCommandOutput | any> {
-    let creatingItem = await this.setDefaultFields(item);
-    creatingItem = await this.applyCustomSetters(creatingItem);
+  async prepareDoc(item: any, applyVirtualSetters?: boolean): Promise<any> {
+    let preparingDoc = await setDefaultFields(this.schema.fields, item);
+    preparingDoc = await applyStringTransformers(this.schema.fields, preparingDoc);
+    preparingDoc = await applyCustomSetters(this.schema.fields, preparingDoc);
 
-    if (options.applyVirtualSetters) {
+    if (applyVirtualSetters) {
       // apply virtual Setters,
+      console.log(Object.keys(this.schema.virtualsSetter));
+      preparingDoc = await this.#applyVirtualSetters(preparingDoc);
     }
 
-    await this.verifyEnums(creatingItem);
-    await this.verifyStringMinMax(creatingItem);
-    await this.verifyNumberMinMax(creatingItem);
+    await this.#verifyFields(preparingDoc);
 
-    creatingItem = this.cleanUnusedFields(creatingItem);
+    preparingDoc = this.#cleanUnusedFields(preparingDoc);
 
-    this.verifyFieldsTypes(creatingItem);
+    return preparingDoc;
+  }
+
+  #applyAlias(item: any, select: selectAlias) {
+    const selectAsAlias = Object.keys(select);
+
+    selectAsAlias.forEach((key) => {
+      let originalKey = key;
+      let aliasKey = key;
+      if (key.includes(":")) {
+        originalKey = key.split(":")[0];
+        aliasKey = key.split(":")[1];
+      }
+
+      if (!item[originalKey]) {
+        return;
+      }
+
+      if (typeof select[key] == "string") {
+        const aliasName = select[key] as string;
+        item[aliasName] = item[originalKey];
+        delete item[originalKey];
+      } else if (typeof select[key] == "object" && typeof item[originalKey] == "object") {
+        item[aliasKey] = this.#applyAlias(item[originalKey], select[key] as selectAlias);
+        if (originalKey !== aliasKey) {
+          delete item[originalKey];
+        }
+      }
+    });
+
+    return item;
+  }
+  async create(item: any, options: createOptions = this.#defaultCreateOptions): Promise<PutCommandOutput | any> {
+    let creatingItem = await this.prepareDoc(item, options.applyVirtualSetters);
 
     const putCmdParams: PutItemCommandInput = {
       TableName: this.name,
@@ -433,15 +299,17 @@ export class Model extends EventEmitter {
   }
 
   async getByPk(partitionKey: string | number, select?: string | selectAlias): Promise<any> {
-    const getCmdParams = this.getCmdInputParams(partitionKey, select);
+    // check params !!
+
+    const getCmdParams = this.#getCmdInputParams(partitionKey, select);
 
     let foundItem = (await this.docClient.send(new GetCommand(getCmdParams))).Item;
 
     if (foundItem) {
-      foundItem = await this.applyVirtualGetters(foundItem, select);
+      foundItem = await this.#applyVirtualGetters(foundItem, select);
 
       if (typeof select == "object" && !Array.isArray(select)) {
-        foundItem = this.applyAlias(foundItem, select);
+        foundItem = this.#applyAlias(foundItem, select);
       }
     }
 
@@ -460,4 +328,178 @@ export class Model extends EventEmitter {
 
     return $metadata.httpStatusCode == 200;
   }
+
+  update(partitionKey: string | number, value: string | number) {
+    const key = this.schema.partitionKey;
+    const updatingDoc = {
+      firstname: "Blabla",
+      lastname: "Yooo",
+      data: {
+        // "last[0]": 888,
+        // "last[1]": 777,
+        last: {
+          // $push: [89],
+          $unshift: [1656545, 853445],
+          //  $pull: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        },
+        nested: {
+          $set: {
+            game: "over",
+          },
+        },
+        $delete: "rank",
+        // rank: { $incr: 1 }, // before 3
+      },
+      last: { $decr: 2 }, // before 15
+    };
+
+    const cleanedExpressions = getUpdateExpress(this.schema.fields, updatingDoc);
+
+    let queryString = "";
+    if (cleanedExpressions.setFields.length) {
+      queryString = `SET ${cleanedExpressions.setFields}`.slice(0, -2);
+    }
+    if (cleanedExpressions.pullFields.length) {
+      queryString += ` REMOVE ${cleanedExpressions.pullFields}`.slice(0, -2);
+    }
+    console.log(queryString);
+    const updateCmd: UpdateCommandInput = {
+      TableName: this.name,
+      Key: {
+        [key]: partitionKey,
+      },
+      UpdateExpression: queryString,
+      ExpressionAttributeValues: cleanedExpressions.ExpressionAttributeValues,
+      ExpressionAttributeNames: cleanedExpressions.ExpressionAttributeNames,
+      ConditionExpression: "size(firstname) < size(lastname)",
+      ReturnValues: "ALL_NEW",
+    };
+
+    return this.docClient.send(new UpdateCommand(updateCmd));
+  }
 }
+
+function getUpdateExpress(fields: ISchema, expr: any, currentConstructor?: {}, nestedPath?: string): any {
+  let expressionConstructor: any = currentConstructor ?? {
+    valCounter: 1,
+    ExpressionAttributeValues: {},
+    ExpressionAttributeNames: {},
+    ConditionExpression: "",
+    setFields: "",
+    pullFields: "",
+  };
+
+  for (const field of Object.keys(expr)) {
+    const fieldObjext = expr[field];
+    const safeWord = applyDynamoSelectExpressions(expressionConstructor.ExpressionAttributeNames, field);
+    const currentNestedPath = nestedPath ? `${nestedPath}.${safeWord}` : safeWord;
+    const fieldValue = `:val${field.replace(/\$|\[|\]/g, "_")}${expressionConstructor.valCounter}`;
+    if (typeof fieldObjext == "object" && !Array.isArray(fieldObjext)) {
+      if (field == "$set") {
+        expressionConstructor.setFields += `${nestedPath} = ${fieldValue}, `;
+        expressionConstructor.valCounter++;
+        expressionConstructor.ExpressionAttributeValues[fieldValue] = fieldObjext;
+      } else {
+        expressionConstructor = getUpdateExpress(fields, fieldObjext, expressionConstructor, currentNestedPath);
+      }
+    } else {
+      if (!field.startsWith("$")) {
+        expressionConstructor.setFields += `${currentNestedPath} = ${fieldValue}, `;
+        expressionConstructor.valCounter++;
+        expressionConstructor.ExpressionAttributeValues[fieldValue] = fieldObjext;
+      } else {
+        if (field == "$push" || field == "$unshift") {
+          let pushingValue = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
+          const withCorrectOrder = field == "$push" ? `${nestedPath}, ${fieldValue}` : `${fieldValue}, ${nestedPath}`;
+          expressionConstructor.setFields += `${nestedPath} = list_append(${withCorrectOrder}), `;
+          expressionConstructor.valCounter++;
+          expressionConstructor.ExpressionAttributeValues[fieldValue] = pushingValue;
+        } else if (field == "$incr" || field == "$decr") {
+          let pushingValue = Number(fieldObjext);
+          const withCorrectOrder = field == "$incr" ? `+ ${fieldValue}` : `- ${fieldValue}`;
+          expressionConstructor.setFields += `${nestedPath} = ${nestedPath} ${withCorrectOrder}, `;
+          expressionConstructor.valCounter++;
+          expressionConstructor.ExpressionAttributeValues[fieldValue] = pushingValue;
+        } else if (field == "$pull") {
+          const pullingElements = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
+
+          if (pullingElements.every((i) => !isNaN(i))) {
+            pullingElements.forEach((i) => {
+              expressionConstructor.pullFields += `${nestedPath}[${i}], `;
+            });
+          }
+        } else if (field == "$delete") {
+          const pullingElements = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
+          pullingElements.forEach((i) => {
+            const safeWord = applyDynamoSelectExpressions(expressionConstructor.ExpressionAttributeNames, i);
+
+            expressionConstructor.pullFields += `${currentNestedPath.replace("$delete", safeWord)}, `;
+          });
+        }
+      }
+    }
+  }
+
+  return expressionConstructor;
+}
+
+function applyDynamoSelectExpressions(ExpressionAttributeNames: any = {}, word: string): string {
+  let safeWord = word;
+  if (safeWord.includes(".")) {
+    safeWord = safeWord
+      .split(".")
+      .map((w) => applyDynamoSelectExpressions(ExpressionAttributeNames, w))
+      .join(".");
+  } else if (safeWord.includes("[")) {
+    safeWord = safeWord
+      .split("[")
+      .map((w) => applyDynamoSelectExpressions(ExpressionAttributeNames, w))
+      .join("[");
+  } else {
+    if (reservedWords.indexOf(word.toUpperCase()) !== -1) {
+      safeWord = `#Safe${word}`;
+      ExpressionAttributeNames[safeWord] = word;
+    }
+  }
+  return safeWord;
+}
+
+// $eq =
+// $neq <>
+// $gt >
+// $gte >=
+// $lt <
+// $lte <=
+// $and AND
+// $not NOT
+// $or OR
+// $in IN
+// $between BETWEEN
+// $size size(path)
+// $contains contains(a, b)
+// $exists attribute_exists(path)
+// $nexists attribute_not_exists(path)
+// $type attribute_type(path, type)
+// $beginsWith begins_with(path, str)
+// $startsWith begins_with(path, str)
+
+//  ConditionExpression
+const conditions = {
+  firstname: {
+    $eq: "",
+  },
+};
+
+function conditionExpressBuilder(conditions: any, currentConstructor: any) {
+  const keys = Object.keys(conditions);
+
+  if (keys.length < 2) {
+    // parse conditions
+  } else {
+    // consider top level as AND conditions
+  }
+}
+
+function parseConditions(fields: any, currentConstructor: any) {}
+
+function parseANDConditions(fields: any, currentConstructor: any) {}

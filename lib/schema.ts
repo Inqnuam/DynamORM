@@ -1,4 +1,4 @@
-import { ISchema, DBString, DBNumber, DBObject, VirtualFields } from "./types/schema";
+import { ISchema, DBString, DBNumber, DBObject, DBArray, VirtualFields } from "./types/schema";
 import { AttributeDefinition, KeySchemaElement } from "@aws-sdk/client-dynamodb";
 
 export const DyString = (attributes: DBString = {}): DBString => {
@@ -22,6 +22,16 @@ export const DyNumber = (attributes: DBNumber = {}): DBNumber => {
 export const DyObject = (attributes: DBObject = {}): DBObject => {
   attributes.type = "M";
 
+  if (!("ignoreUndeclared" in attributes)) {
+    attributes.ignoreUndeclared = false;
+  }
+  return attributes;
+};
+
+export const DyArray = (attributes: DBArray): DBArray => {
+  if (!attributes.type) {
+    attributes.type = "L";
+  }
   return attributes;
 };
 

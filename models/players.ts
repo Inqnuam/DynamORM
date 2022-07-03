@@ -11,38 +11,66 @@ const id = DyString({
 const schema: Schema = new Schema({
   id: id,
   firstname: DyString({
+    trim: true,
     maxLength: (self) => {
       return 8;
     },
+    uppercase: false,
   }),
   lastname: DyString({
-    minLength: (self) => {
-      return 4;
+    capitalize: false,
+  }),
+  data: DyObject({
+    fields: {
+      anotherTrimmableFields: { type: "S", trim: true },
+      nested: DyObject({
+        fields: {
+          bobo: DyObject({
+            fields: {
+              toto: DyObject({
+                fields: {
+                  lolo: DyString({ trim: true }),
+                },
+              }),
+            },
+          }),
+        },
+      }),
+      rank: DyNumber({
+        enum: (self) => {
+          return self.isNew ? [1, 2, 3] : [0];
+        },
+      }),
+      country: DyString({
+        default: (self) => {
+          return "France";
+        },
+        required: (self) => {
+          return self.isNew;
+        },
+      }),
     },
   }),
-  data: DyObject({ fields: {} }),
   age: DyNumber({
     enum: (self) => {
       return self.isNew ? [7, 8] : [1, 2];
     },
   }),
   sex: DyString({
-    enum: ["F", "M"], // add enum as function
+    enum: ["F", "M"],
     required: (self) => self.isNew,
   }),
   last: DyNumber({
-    min: 4,
-    max: (self) => {
-      return self.isNew ? 5 : 3;
-    },
-    set: (self) => {
-      return self.age < 18 ? self.last - 1 : self.last;
-    },
+    min: 8,
   }),
 });
 
 schema.virtual.getter("fullname", (self: any) => {
   return `${self.firstname} ${self.lastname}`;
+});
+
+schema.virtual.setter("score_global", (self) => {
+  return self.firstname;
 });
 
 const clientConfig = { region: "eu-west-3", endpoint: "http://localhost:8000" };
