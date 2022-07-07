@@ -41,7 +41,9 @@ import { verifyStringMinMax } from "./utils/verifyStringMinMax";
 import { verifyEnums } from "./utils/verifyEnums";
 import { setDefaultFields } from "./utils/setDefaultFields";
 import { verifyRequiredFields } from "./utils/verifyRequiredFields";
-
+import { getDynamoUpdateObject } from "./utils/applyExpressions";
+import { ExpressionAttributes, AttributeValue } from "@aws/dynamodb-expressions";
+import { convertToNative, unmarshall } from "@aws-sdk/util-dynamodb";
 export class Model extends EventEmitter {
   // temporary use of EventEmiter for testing in index.ts as top-level await isnt supported
   readonly name: string;
@@ -329,118 +331,51 @@ export class Model extends EventEmitter {
     return $metadata.httpStatusCode == 200;
   }
 
-  update(partitionKey: string | number, value: string | number) {
+  async update(partitionKey: string | number, value: string | number) {
     const key = this.schema.partitionKey;
     const updatingDoc = {
       firstname: "Blabla",
       lastname: "Yooo",
       data: {
-        // "last[0]": 888,
-        // "last[1]": 777,
-        last: {
-          // $push: [89],
-          $unshift: [1656545, 853445],
-          //  $pull: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-        },
+        "last[0]": 888,
+        "last[1]": 777,
+        // last: {
+        //   $push: [89],
+        //   // $unshift: [1656545, 853445],
+        //   //$pull: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        // },
         nested: {
           $set: {
             game: "over",
           },
         },
-        $delete: "rank",
-        // rank: { $incr: 1 }, // before 3
+        //$delete: "rank",
+        rank: { $incr: 1 }, // before 3
       },
       last: { $decr: 2 }, // before 15
     };
 
-    const cleanedExpressions = getUpdateExpress(this.schema.fields, updatingDoc);
+    const cleanedExpressions = getDynamoUpdateObject(updatingDoc);
 
-    let queryString = "";
-    if (cleanedExpressions.setFields.length) {
-      queryString = `SET ${cleanedExpressions.setFields}`.slice(0, -2);
-    }
-    if (cleanedExpressions.pullFields.length) {
-      queryString += ` REMOVE ${cleanedExpressions.pullFields}`.slice(0, -2);
-    }
-    console.log(queryString);
+    let attributeeees = new ExpressionAttributes();
+    const queryString = cleanedExpressions.serialize(attributeeees);
+
+    let ExpressionAttributeValues = unmarshall(new AttributeValue(attributeeees.values).marshalled);
+
     const updateCmd: UpdateCommandInput = {
       TableName: this.name,
       Key: {
         [key]: partitionKey,
       },
       UpdateExpression: queryString,
-      ExpressionAttributeValues: cleanedExpressions.ExpressionAttributeValues,
-      ExpressionAttributeNames: cleanedExpressions.ExpressionAttributeNames,
-      ConditionExpression: "size(firstname) < size(lastname)",
+      ExpressionAttributeValues,
+      ExpressionAttributeNames: attributeeees.names,
+      //  ConditionExpression: "size(firstname) < size(lastname)",
       ReturnValues: "ALL_NEW",
     };
 
     return this.docClient.send(new UpdateCommand(updateCmd));
   }
-}
-
-function getUpdateExpress(fields: ISchema, expr: any, currentConstructor?: {}, nestedPath?: string): any {
-  let expressionConstructor: any = currentConstructor ?? {
-    valCounter: 1,
-    ExpressionAttributeValues: {},
-    ExpressionAttributeNames: {},
-    ConditionExpression: "",
-    setFields: "",
-    pullFields: "",
-  };
-
-  for (const field of Object.keys(expr)) {
-    const fieldObjext = expr[field];
-    const safeWord = applyDynamoSelectExpressions(expressionConstructor.ExpressionAttributeNames, field);
-    const currentNestedPath = nestedPath ? `${nestedPath}.${safeWord}` : safeWord;
-    const fieldValue = `:val${field.replace(/\$|\[|\]/g, "_")}${expressionConstructor.valCounter}`;
-    if (typeof fieldObjext == "object" && !Array.isArray(fieldObjext)) {
-      if (field == "$set") {
-        expressionConstructor.setFields += `${nestedPath} = ${fieldValue}, `;
-        expressionConstructor.valCounter++;
-        expressionConstructor.ExpressionAttributeValues[fieldValue] = fieldObjext;
-      } else {
-        expressionConstructor = getUpdateExpress(fields, fieldObjext, expressionConstructor, currentNestedPath);
-      }
-    } else {
-      if (!field.startsWith("$")) {
-        expressionConstructor.setFields += `${currentNestedPath} = ${fieldValue}, `;
-        expressionConstructor.valCounter++;
-        expressionConstructor.ExpressionAttributeValues[fieldValue] = fieldObjext;
-      } else {
-        if (field == "$push" || field == "$unshift") {
-          let pushingValue = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
-          const withCorrectOrder = field == "$push" ? `${nestedPath}, ${fieldValue}` : `${fieldValue}, ${nestedPath}`;
-          expressionConstructor.setFields += `${nestedPath} = list_append(${withCorrectOrder}), `;
-          expressionConstructor.valCounter++;
-          expressionConstructor.ExpressionAttributeValues[fieldValue] = pushingValue;
-        } else if (field == "$incr" || field == "$decr") {
-          let pushingValue = Number(fieldObjext);
-          const withCorrectOrder = field == "$incr" ? `+ ${fieldValue}` : `- ${fieldValue}`;
-          expressionConstructor.setFields += `${nestedPath} = ${nestedPath} ${withCorrectOrder}, `;
-          expressionConstructor.valCounter++;
-          expressionConstructor.ExpressionAttributeValues[fieldValue] = pushingValue;
-        } else if (field == "$pull") {
-          const pullingElements = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
-
-          if (pullingElements.every((i) => !isNaN(i))) {
-            pullingElements.forEach((i) => {
-              expressionConstructor.pullFields += `${nestedPath}[${i}], `;
-            });
-          }
-        } else if (field == "$delete") {
-          const pullingElements = Array.isArray(fieldObjext) ? fieldObjext : [fieldObjext];
-          pullingElements.forEach((i) => {
-            const safeWord = applyDynamoSelectExpressions(expressionConstructor.ExpressionAttributeNames, i);
-
-            expressionConstructor.pullFields += `${currentNestedPath.replace("$delete", safeWord)}, `;
-          });
-        }
-      }
-    }
-  }
-
-  return expressionConstructor;
 }
 
 function applyDynamoSelectExpressions(ExpressionAttributeNames: any = {}, word: string): string {
@@ -489,17 +424,3 @@ const conditions = {
     $eq: "",
   },
 };
-
-function conditionExpressBuilder(conditions: any, currentConstructor: any) {
-  const keys = Object.keys(conditions);
-
-  if (keys.length < 2) {
-    // parse conditions
-  } else {
-    // consider top level as AND conditions
-  }
-}
-
-function parseConditions(fields: any, currentConstructor: any) {}
-
-function parseANDConditions(fields: any, currentConstructor: any) {}

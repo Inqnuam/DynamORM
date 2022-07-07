@@ -2,6 +2,7 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.121.0",
     "@aws-sdk/lib-dynamodb": "^3.121.0",
+    "@aws-sdk/util-dynamodb": "^3.121.0",
     "@aws/dynamodb-expressions": "^0.7.3"
   },
   "name": "dynamodm",
@@ -17,6 +18,6 @@
   "license": "ISC",
   "description": "ORM for Amazon DynamoDB",
   "devDependencies": {
-    "@types/node": "^17.0.41"
+    "@types/node": "^18.0.3"
   }
 }
