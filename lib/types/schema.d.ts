@@ -42,6 +42,14 @@ interface ISchemaArray {
   required?: boolean | ((self) => boolean);
   set?: (self?: any) => array;
 }
+
+interface ISchemaBool {
+  type?: "BOOL";
+  default?: boolean | ((self?: any) => boolean);
+  required?: boolean | ((self) => boolean);
+  set?: (self?: any) => boolean;
+  get?: (self?: any) => boolean;
+}
 interface ISchemaPrimitiveAttributes {
   partitionKey?: boolean;
   secondaryKey?: boolean;
@@ -56,9 +64,9 @@ export type DBString = ISchemaString & ISchemaPrimitiveAttributes;
 export type DBNumber = ISchemaNumber & ISchemaPrimitiveAttributes;
 export type DBObject = ISchemaObject;
 export type DBArray = ISchemaArray;
-
+export type DBBool = ISchemaBool;
 export interface ISchema {
-  [attributeName: string]: DBString | DBNumber | DBObject;
+  [attributeName: string]: DBString | DBNumber | DBObject | DBBool | DBArray;
 }
 
 export interface VirtualFields {

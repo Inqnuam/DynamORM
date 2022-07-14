@@ -1,7 +1,7 @@
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { AttributePath, ExpressionAttributes, FunctionExpression, ConditionExpression, UpdateExpression, MathematicalExpression, AttributeValue } from "@aws/dynamodb-expressions";
 
-export function getDynamoUpdateObject(doc: any, _update?: UpdateExpression, _rawPath?: string): UpdateExpression {
+export function getUpdateExpressions(doc: any, _update?: UpdateExpression, _rawPath?: string): UpdateExpression {
   let update = _update ?? new UpdateExpression();
 
   for (const fieldName of Object.keys(doc)) {
@@ -15,9 +15,17 @@ export function getDynamoUpdateObject(doc: any, _update?: UpdateExpression, _raw
 
     if (typeof field == "object" && !Array.isArray(field)) {
       if (fieldName == "$set") {
-        update.set(attrPath, field);
+        if (rawPath == fieldName) {
+          Object.keys(field).forEach((k) => {
+            const childAttrPath = new AttributePath(k);
+            const childValue = field[k];
+            update.set(childAttrPath, childValue);
+          });
+        } else {
+          update.set(attrPath, field);
+        }
       } else {
-        getDynamoUpdateObject(field, update, rawPath);
+        getUpdateExpressions(field, update, rawPath);
       }
     } else {
       if (!fieldName.startsWith("$")) {
@@ -38,15 +46,14 @@ export function getDynamoUpdateObject(doc: any, _update?: UpdateExpression, _raw
 
           update.set(rawPath, expr);
         } else if (fieldName == "$decr") {
-          console.log(rawPath, field);
           const expr = new MathematicalExpression(rawPath, "-", field);
 
           update.set(rawPath, expr);
         } else if (fieldName == "$pull" || fieldName == "$remove") {
           let pullingItems = Array.isArray(field) ? field : [field];
-
+          let currentPath = rawPath.startsWith("$") ? "" : rawPath + ".";
           pullingItems.forEach((item) => {
-            const nestedPath = isNaN(item) ? `${rawPath}.${item}` : `${rawPath}[${item}]`;
+            const nestedPath = currentPath + isNaN(item) ? `${item}` : `${rawPath}[${item}]`;
             update.remove(nestedPath);
           });
         } else if (fieldName == "$delete") {

@@ -17,52 +17,66 @@ const schema: Schema = new Schema({
     },
     uppercase: false,
   }),
-  lastname: DyString({
+  lastname: {
+    type: String,
     capitalize: false,
-  }),
-  data: DyObject({
+  },
+  data: {
+    type: Object,
     fields: {
-      anotherTrimmableFields: { type: "S", trim: true },
-      nested: DyObject({
+      anotherTrimmableFields: { type: "String", trim: true },
+      nested: {
+        type: Object,
         fields: {
-          bobo: DyObject({
+          bobo: {
+            type: Object,
             fields: {
-              toto: DyObject({
+              toto: {
+                type: Object,
                 fields: {
-                  lolo: DyString({ trim: true }),
+                  lolo: Number,
                 },
-              }),
+              },
             },
-          }),
+          },
         },
-      }),
-      rank: DyNumber({
-        enum: (self) => {
+      },
+      rank: {
+        type: Number,
+        enum: (self: any) => {
           return self.isNew ? [1, 2, 3] : [0];
         },
-      }),
-      country: DyString({
-        default: (self) => {
+      },
+      country: {
+        type: String,
+        default: (self: any) => {
           return "France";
         },
-        required: (self) => {
+        required: (self: any) => {
           return self.isNew;
         },
-      }),
+      },
     },
-  }),
+  },
   age: DyNumber({
     enum: (self) => {
       return self.isNew ? [7, 8] : [1, 2];
     },
   }),
-  sex: DyString({
+  sex: {
+    type: String,
     enum: ["F", "M"],
-    required: (self) => self.isNew,
-  }),
-  last: DyNumber({
-    min: 8,
-  }),
+    required: (self: any) => self.isNew,
+  },
+  last: Number,
+  resultsBySport: {
+    type: Object,
+    required: true,
+    fields: {
+      tennis: Number,
+      football: Number,
+    },
+  },
 });
 
 schema.virtual.getter("fullname", (self: any) => {

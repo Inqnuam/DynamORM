@@ -31,7 +31,7 @@ import {
   PutItemCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import { Schema } from "./schema";
-import { ISchema, selectAlias, createOptions, DBNumber, DBString } from "./types/schema";
+import { ISchema, selectAlias, createOptions, DBNumber, DBString, DBObject } from "./types/schema";
 import { EventEmitter } from "events";
 import { reservedWords } from "./reservedWords";
 import { applyStringTransformers } from "./utils/applyStringTransformers";
@@ -41,9 +41,10 @@ import { verifyStringMinMax } from "./utils/verifyStringMinMax";
 import { verifyEnums } from "./utils/verifyEnums";
 import { setDefaultFields } from "./utils/setDefaultFields";
 import { verifyRequiredFields } from "./utils/verifyRequiredFields";
-import { getDynamoUpdateObject } from "./utils/applyExpressions";
-import { ExpressionAttributes, AttributeValue } from "@aws/dynamodb-expressions";
+import { getUpdateExpressions } from "./utils/getUpdateExpressions";
+import { ExpressionAttributes, AttributeValue, serializeConditionExpression, ConditionExpression } from "@aws/dynamodb-expressions";
 import { convertToNative, unmarshall } from "@aws-sdk/util-dynamodb";
+import { getConditionExpressions } from "./utils/getConditionExpressions";
 export class Model extends EventEmitter {
   // temporary use of EventEmiter for testing in index.ts as top-level await isnt supported
   readonly name: string;
@@ -212,10 +213,63 @@ export class Model extends EventEmitter {
     return item;
   }
 
+  #nativeTypeToDDBType(field: any): string | null {
+    const typeOfField = typeof field;
+
+    switch (typeOfField) {
+      case "object":
+        if (Array.isArray(field)) {
+          return "L";
+        } else if (field instanceof Set) {
+          const values = Array.from(field.values());
+          if (values.every((x) => typeof x == "number")) {
+            return "NS";
+          } else if (values.every((x) => typeof x == "string")) {
+            return "SS";
+          }
+          return null;
+        } else {
+          return "M";
+        }
+
+      case "string":
+        return "S";
+      case "number":
+        return "N";
+      case "boolean":
+        return "BOOL";
+
+      default:
+        return null;
+    }
+  }
+  #verifyTypes(fields: ISchema, item: any, nestedPath?: string) {
+    Object.keys(item).forEach((key) => {
+      const field = item[key];
+      const fieldDDBType = this.#nativeTypeToDDBType(field);
+      const fieldInSchema = fields[key];
+      if (!fieldInSchema) {
+        return;
+      }
+      const typeInSchema = fieldInSchema.type;
+
+      if (!typeInSchema) {
+        return;
+      }
+      const currentPath = nestedPath ? `${nestedPath}.${key}` : key;
+      if (fieldDDBType !== typeInSchema) {
+        throw Error(`Ìnvalid type for ${this.name}.${currentPath}\nExcepted: ${typeInSchema}\nReceived: ${fieldDDBType}`);
+      }
+
+      if (fieldDDBType == "M" && (fieldInSchema as DBObject).fields) {
+        this.#verifyTypes((fieldInSchema as DBObject).fields!, field, currentPath);
+      }
+    });
+  }
   async #verifyFields(item: any) {
     await verifyRequiredFields(this.schema.fields, item, this.name);
 
-    //  TODO: verifyTypes
+    this.#verifyTypes(this.schema.fields, item);
     await verifyEnums(this.schema.fields, item, this.name);
     await verifyStringMinMax(this.schema.fields, item, this.name);
     await verifyNumberMinMax(this.schema.fields, item, this.name);
@@ -241,8 +295,6 @@ export class Model extends EventEmitter {
     preparingDoc = await applyCustomSetters(this.schema.fields, preparingDoc);
 
     if (applyVirtualSetters) {
-      // apply virtual Setters,
-      console.log(Object.keys(this.schema.virtualsSetter));
       preparingDoc = await this.#applyVirtualSetters(preparingDoc);
     }
 
@@ -331,48 +383,40 @@ export class Model extends EventEmitter {
     return $metadata.httpStatusCode == 200;
   }
 
-  async update(partitionKey: string | number, value: string | number) {
+  async update(partitionKey: string | number, updateExpr: updateExpr, ifConditions?: any) {
     const key = this.schema.partitionKey;
-    const updatingDoc = {
-      firstname: "Blabla",
-      lastname: "Yooo",
-      data: {
-        "last[0]": 888,
-        "last[1]": 777,
-        // last: {
-        //   $push: [89],
-        //   // $unshift: [1656545, 853445],
-        //   //$pull: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-        // },
-        nested: {
-          $set: {
-            game: "over",
-          },
-        },
-        //$delete: "rank",
-        rank: { $incr: 1 }, // before 3
-      },
-      last: { $decr: 2 }, // before 15
-    };
 
-    const cleanedExpressions = getDynamoUpdateObject(updatingDoc);
+    const cleanedExpressions = getUpdateExpressions(updateExpr);
 
     let attributeeees = new ExpressionAttributes();
     const queryString = cleanedExpressions.serialize(attributeeees);
 
-    let ExpressionAttributeValues = unmarshall(new AttributeValue(attributeeees.values).marshalled);
+    let resolvedConditionExpression: string = "";
 
-    const updateCmd: UpdateCommandInput = {
+    if (ifConditions) {
+      const condExpr = getConditionExpressions(ifConditions);
+      //console.log("condExpr", condExpr.conditions[1].conditions);
+      resolvedConditionExpression = serializeConditionExpression(condExpr, attributeeees);
+    }
+
+    let updateCmd: UpdateCommandInput = {
       TableName: this.name,
       Key: {
         [key]: partitionKey,
       },
       UpdateExpression: queryString,
-      ExpressionAttributeValues,
       ExpressionAttributeNames: attributeeees.names,
-      //  ConditionExpression: "size(firstname) < size(lastname)",
       ReturnValues: "ALL_NEW",
     };
+
+    if (Object.keys(attributeeees.values).length) {
+      updateCmd.ExpressionAttributeValues = unmarshall(new AttributeValue(attributeeees.values).marshalled);
+    }
+
+    if (resolvedConditionExpression != "") {
+      updateCmd.ConditionExpression = resolvedConditionExpression;
+      console.log("resolvedConditionExpression", resolvedConditionExpression);
+    }
 
     return this.docClient.send(new UpdateCommand(updateCmd));
   }
@@ -399,28 +443,35 @@ function applyDynamoSelectExpressions(ExpressionAttributeNames: any = {}, word: 
   return safeWord;
 }
 
-// $eq =
-// $neq <>
-// $gt >
-// $gte >=
-// $lt <
-// $lte <=
-// $and AND
-// $not NOT
-// $or OR
-// $in IN
-// $between BETWEEN
-// $size size(path)
-// $contains contains(a, b)
-// $exists attribute_exists(path)
-// $nexists attribute_not_exists(path)
-// $type attribute_type(path, type)
-// $beginsWith begins_with(path, str)
-// $startsWith begins_with(path, str)
+type updateFieldName = "$pull" | "$push" | "$unshift" | "$incr" | "$decr"; //| string;
 
-//  ConditionExpression
-const conditions = {
-  firstname: {
-    $eq: "",
-  },
+type updateExpr = {
+  $set?: any;
+  $add?: any;
+
+  /**
+   * @type {string}
+   */
+  $delete?: any;
+  $remove?: any;
+
+  $pull?: any;
+  /**
+   * Push an item or an array of items into an array
+   * @example
+   * ```js
+   * {
+   *  games: {
+   *    victories: { $push: 1 }
+   *  },
+   *  hobbies: { $push: ["Tennis", "Golf"] }
+   * }
+   * ```
+   */
+  $push?: any | any[];
+  $unshift?: any;
+
+  $incr?: any;
+  $decr?: any;
+  [key: string]: any | updateExpr;
 };
