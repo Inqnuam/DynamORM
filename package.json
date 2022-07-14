@@ -1,23 +1,23 @@
 {
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.128.0",
-    "@aws-sdk/lib-dynamodb": "^3.128.0",
-    "@aws-sdk/util-dynamodb": "^3.128.0",
+    "@aws-sdk/client-dynamodb": "^3.130.0",
+    "@aws-sdk/lib-dynamodb": "^3.130.0",
+    "@aws-sdk/util-dynamodb": "^3.130.0",
     "@aws/dynamodb-expressions": "^0.7.3"
   },
   "name": "dynamodm",
   "version": "1.0.0",
-  "main": "./build/index.js",
+  "main": "./dist/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node ./build/index.js",
+    "start": "node ./dist/index.js",
     "build": "tsc -p ./tsconfig.json",
-    "launch": "npm run build && npm run start"
+    "launch": "npm run dist && npm run start"
   },
   "author": "Inqnuam",
-  "license": "ISC",
-  "description": "ORM for Amazon DynamoDB",
+  "license": "MIT",
+  "description": "ODM for Amazon DynamoDB",
   "devDependencies": {
-    "@types/node": "^18.0.3"
+    "@types/node": "^18.0.4"
   }
 }

@@ -1,5 +1,5 @@
-import { Model } from "../lib/model";
-import { Schema, DyString, DyNumber, DyObject } from "../lib/schema";
+import { Model } from "../model";
+import { Schema, DyString, DyNumber, DyObject } from "../schema";
 import { randomUUID } from "crypto";
 
 const id = DyString({

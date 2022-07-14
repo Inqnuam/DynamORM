@@ -352,18 +352,31 @@ export class Model extends EventEmitter {
     return createdItemResponse;
   }
 
-  async getByPk(partitionKey: string | number, select?: string | selectAlias): Promise<any> {
+  async getByPk(partitionKey: string | number, select?: string | selectAlias | selectAndExclude): Promise<any> {
     // check params !!
 
-    const getCmdParams = this.#getCmdInputParams(partitionKey, select);
+    let customSelect = undefined;
+    let exclude = undefined; // TODO: add exclude handler
+
+    if (typeof select == "string") {
+      customSelect = select as string;
+    } else if (typeof select == "object") {
+      if (select.select || (!select.select && !select.exclude)) {
+        customSelect = select as selectAlias;
+      }
+      if (select.exclude) {
+        exclude = select.exclude;
+      }
+    }
+    const getCmdParams = this.#getCmdInputParams(partitionKey, customSelect);
 
     let foundItem = (await this.docClient.send(new GetCommand(getCmdParams))).Item;
 
     if (foundItem) {
-      foundItem = await this.#applyVirtualGetters(foundItem, select);
+      foundItem = await this.#applyVirtualGetters(foundItem, customSelect);
 
-      if (typeof select == "object" && !Array.isArray(select)) {
-        foundItem = this.#applyAlias(foundItem, select);
+      if (typeof customSelect == "object" && !Array.isArray(customSelect)) {
+        foundItem = this.#applyAlias(foundItem, customSelect);
       }
     }
 
@@ -475,3 +488,8 @@ type updateExpr = {
   $decr?: any;
   [key: string]: any | updateExpr;
 };
+
+interface selectAndExclude {
+  select: string | selectAlias;
+  exclude: string | selectAlias;
+}
