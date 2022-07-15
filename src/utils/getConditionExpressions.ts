@@ -212,6 +212,6 @@ export function getConditionExpressions($if: any, _rawPath?: string): ConditionE
   }
 }
 
-const isJsObject = (value: any) => {
-  return value !== null && typeof value == "object" && !Array.isArray(value) && !(value instanceof Date);
+export const isJsObject = (value: any) => {
+  return value !== null && typeof value == "object" && !Array.isArray(value) && !(value instanceof Date) && !(value instanceof Set);
 };

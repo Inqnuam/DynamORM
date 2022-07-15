@@ -44,7 +44,7 @@ import { verifyRequiredFields } from "./utils/verifyRequiredFields";
 import { getUpdateExpressions } from "./utils/getUpdateExpressions";
 import { ExpressionAttributes, AttributeValue, serializeConditionExpression, ConditionExpression } from "@aws/dynamodb-expressions";
 import { convertToNative, unmarshall } from "@aws-sdk/util-dynamodb";
-import { getConditionExpressions } from "./utils/getConditionExpressions";
+import { getConditionExpressions, isJsObject } from "./utils/getConditionExpressions";
 export class Model extends EventEmitter {
   // temporary use of EventEmiter for testing in index.ts as top-level await isnt supported
   readonly name: string;
@@ -201,12 +201,20 @@ export class Model extends EventEmitter {
     return this.client.send(new DescribeTableCommand(cmd));
   }
 
-  #cleanUnusedFields(item: any): any {
-    const allowedFields = [...Object.keys(this.schema.fields), ...Object.keys(this.schema.virtualsSetter)];
+  #cleanUnusedFields(fields: ISchema, item: any, allowed?: string[]): any {
+    const allowedFields = allowed ?? [...Object.keys(fields)];
 
     Object.keys(item).forEach((field) => {
+      let fieldInSchema = fields[field];
+
       if (allowedFields.indexOf(field) == -1) {
         delete item[field];
+      } else if (isJsObject(item[field]) && fieldInSchema) {
+        const hasDeclaredChilds = Object.keys((fieldInSchema as DBObject).fields ?? {}).length;
+
+        if (fieldInSchema.type == "M" && !fieldInSchema.allowUndeclared && hasDeclaredChilds) {
+          item[field] = this.#cleanUnusedFields(fieldInSchema.fields!, item[field]);
+        }
       }
     });
 
@@ -243,7 +251,9 @@ export class Model extends EventEmitter {
         return null;
     }
   }
-  #verifyTypes(fields: ISchema, item: any, nestedPath?: string) {
+  #verifyTypes(fields: ISchema, item: any, nestedPath?: string): string[] {
+    let errors: string[] = [];
+
     Object.keys(item).forEach((key) => {
       const field = item[key];
       const fieldDDBType = this.#nativeTypeToDDBType(field);
@@ -258,18 +268,33 @@ export class Model extends EventEmitter {
       }
       const currentPath = nestedPath ? `${nestedPath}.${key}` : key;
       if (fieldDDBType !== typeInSchema) {
-        throw Error(`Ìnvalid type for ${this.name}.${currentPath}\nExcepted: ${typeInSchema}\nReceived: ${fieldDDBType}`);
+        errors.push(`Ìnvalid type for ${this.name}.${currentPath} Excepted: ${typeInSchema} Received: ${fieldDDBType}`);
       }
 
       if (fieldDDBType == "M" && (fieldInSchema as DBObject).fields) {
-        this.#verifyTypes((fieldInSchema as DBObject).fields!, field, currentPath);
+        const childErrors = this.#verifyTypes((fieldInSchema as DBObject).fields!, field, currentPath);
+
+        if (childErrors.length) {
+          errors = errors.concat(childErrors);
+        }
       }
     });
+
+    return errors;
   }
   async #verifyFields(item: any) {
-    await verifyRequiredFields(this.schema.fields, item, this.name);
+    let errors = await verifyRequiredFields(this.schema.fields, item, this.name);
 
-    this.#verifyTypes(this.schema.fields, item);
+    if (errors.length) {
+      throw Error(errors.join("\n"));
+    }
+
+    errors = this.#verifyTypes(this.schema.fields, item);
+
+    if (errors.length) {
+      throw Error(errors.join("\n"));
+    }
+
     await verifyEnums(this.schema.fields, item, this.name);
     await verifyStringMinMax(this.schema.fields, item, this.name);
     await verifyNumberMinMax(this.schema.fields, item, this.name);
@@ -300,7 +325,8 @@ export class Model extends EventEmitter {
 
     await this.#verifyFields(preparingDoc);
 
-    preparingDoc = this.#cleanUnusedFields(preparingDoc);
+    const allowedFields = [...Object.keys(this.schema.fields), ...Object.keys(this.schema.virtualsSetter)];
+    preparingDoc = this.#cleanUnusedFields(this.schema.fields, preparingDoc, allowedFields);
 
     return preparingDoc;
   }

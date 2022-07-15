@@ -32,7 +32,7 @@ interface ISchemaObject {
   default?: object | ((self?: any) => object);
   required?: boolean | ((self) => boolean);
   set?: (self?: any) => ISchema;
-  ignoreUndeclared?: boolean;
+  allowUndeclared?: boolean;
   fields?: ISchema;
 }
 

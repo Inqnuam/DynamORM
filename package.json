@@ -12,7 +12,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node ./dist/index.js",
     "build": "tsc -p ./tsconfig.json",
-    "launch": "npm run dist && npm run start"
+    "launch": "npm run build && npm run start"
   },
   "author": "Inqnuam",
   "license": "MIT",

@@ -25,7 +25,8 @@ const newPlayer = {
   },
   last: 7,
   resultsBySport: {
-    tennis: "Hello World",
+    tennis: 6,
+    thisAsAn: "Undeclared field!!!",
   },
 };
 

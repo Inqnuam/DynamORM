@@ -2,21 +2,23 @@ import { Model } from "../model";
 import { Schema, DyString, DyNumber, DyObject } from "../schema";
 import { randomUUID } from "crypto";
 
-const id = DyString({
+const id = {
+  type: String,
   partitionKey: true,
   sortKey: true,
   default: randomUUID,
-});
+};
 
 const schema: Schema = new Schema({
   id: id,
-  firstname: DyString({
+  firstname: {
+    type: String,
     trim: true,
-    maxLength: (self) => {
+    maxLength: (self: any) => {
       return 8;
     },
     uppercase: false,
-  }),
+  },
   lastname: {
     type: String,
     capitalize: false,
@@ -58,11 +60,12 @@ const schema: Schema = new Schema({
       },
     },
   },
-  age: DyNumber({
-    enum: (self) => {
+  age: {
+    type: Number,
+    enum: (self: any) => {
       return self.isNew ? [7, 8] : [1, 2];
     },
-  }),
+  },
   sex: {
     type: String,
     enum: ["F", "M"],
@@ -72,6 +75,7 @@ const schema: Schema = new Schema({
   resultsBySport: {
     type: Object,
     required: true,
+    allowUndeclared: true,
     fields: {
       tennis: Number,
       football: Number,

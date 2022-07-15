@@ -22,8 +22,8 @@ export const DyNumber = (attributes: DBNumber = {}): DBNumber => {
 export const DyObject = (attributes: DBObject = {}): DBObject => {
   attributes.type = "M";
 
-  if (!("ignoreUndeclared" in attributes)) {
-    attributes.ignoreUndeclared = false;
+  if (!("allowUndeclared" in attributes)) {
+    attributes.allowUndeclared = false;
   }
   return attributes;
 };
@@ -114,7 +114,10 @@ export class Schema {
           }
           key.type = parsedType;
         }
-        if (key.type == "M" && key.fields) {
+        if (key.type == "M") {
+          if (!key.fields) {
+            key.fields = {};
+          }
           key.fields = this.#parseSchema(key.fields);
         }
         if (isPrimitiveType(key.type)) {
